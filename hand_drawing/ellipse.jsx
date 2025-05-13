@@ -211,8 +211,8 @@ const DrawingApp = () => {
   const [isDrawing, setIsDrawing] = useState(false);
   const [paths, setPaths] = useState([]);
   const [originalPaths, setOriginalPaths] = useState([]);
+  const [processedPaths, setProcessedPaths] = useState([]); // Store processed paths separately
   const [tool, setTool] = useState("pencil");
-  const [isUndoUsed, setIsUndoUsed] = useState(false); // Track if undo has been used for the recent stroke
   const [epsilon, setEpsilon] = useState(20.0); // State for epsilon value
   const connectionThreshold = 20; // Threshold for connecting strokes
   let currentPath = [];
@@ -262,6 +262,7 @@ const DrawingApp = () => {
       }
     });
   };
+
   const startDrawing = ({ nativeEvent }) => {
     const { offsetX, offsetY } = nativeEvent;
     if (tool === "eraser") {
@@ -272,7 +273,6 @@ const DrawingApp = () => {
     contextRef.current.beginPath();
     contextRef.current.moveTo(offsetX, offsetY);
     currentPath = [{ x: offsetX, y: offsetY }];
-    setIsUndoUsed(false); // Reset undo flag when starting a new stroke
   };
 
   const draw = ({ nativeEvent }) => {
@@ -287,63 +287,67 @@ const DrawingApp = () => {
     setIsDrawing(false);
     if (currentPath.length < 2) return; // Minimum points to consider for simplification
   
+    // Store the original path
+    const newOriginalPaths = [...originalPaths, currentPath];
+    setOriginalPaths(newOriginalPaths);
+    
+    // Process the path (simplify or fit shape)
     const circle = fitCircle(currentPath);
     const ellipse = circle ? null : fitEllipse(currentPath);
+    
     if (circle) {
       setPaths(prevPaths => {
         const newPaths = [...prevPaths, { isCircle: true, ...circle }];
-        setOriginalPaths(prevOriginalPaths => [...prevOriginalPaths, currentPath]);
+        setProcessedPaths(prev => [...prev, { isCircle: true, ...circle }]);
         redrawCanvas(newPaths);
         return newPaths;
       });
     } else if (ellipse) {
       setPaths(prevPaths => {
         const newPaths = [...prevPaths, { isEllipse: true, ...ellipse }];
-        setOriginalPaths(prevOriginalPaths => [...prevOriginalPaths, currentPath]);
+        setProcessedPaths(prev => [...prev, { isEllipse: true, ...ellipse }]);
         redrawCanvas(newPaths);
         return newPaths;
       });
     } else {
       setPaths(prevPaths => {
         let newPaths = [...prevPaths];
-        let newOriginalPaths = [...originalPaths, currentPath];
-  
-        // Check if the last stroke's endpoint is close to the current stroke's starting point
+        let newProcessedPaths = [...processedPaths];
+        
+        // Check for connection with previous path
         if (prevPaths.length > 0) {
           const lastPath = prevPaths[prevPaths.length - 1];
-  
-          // Skip connection logic if the last stroke is a circle or ellipse
+          
           if (!lastPath.isCircle && !lastPath.isEllipse) {
             const lastPoint = lastPath[lastPath.length - 1];
             const firstPoint = currentPath[0];
-  
+            
             if (distance(lastPoint, firstPoint) < connectionThreshold) {
-              // Connect the two strokes at their midpoint
+              // Connect the paths
               const midPoint = {
                 x: (lastPoint.x + firstPoint.x) / 2,
                 y: (lastPoint.y + firstPoint.y) / 2,
               };
-  
-              // Merge the last stroke, midpoint, and current stroke
               const mergedPath = [...lastPath, midPoint, ...currentPath];
-  
-              // Remove the last stroke and add the merged stroke
+              
               newPaths.pop();
               newPaths.push(simplifyPath(mergedPath, epsilon));
+              newProcessedPaths.pop();
+              newProcessedPaths.push(simplifyPath(mergedPath, epsilon));
             } else {
-              // Add the current stroke as a new path
               newPaths.push(simplifyPath(currentPath, epsilon));
+              newProcessedPaths.push(simplifyPath(currentPath, epsilon));
             }
           } else {
-            // Add the current stroke as a new path
             newPaths.push(simplifyPath(currentPath, epsilon));
+            newProcessedPaths.push(simplifyPath(currentPath, epsilon));
           }
         } else {
-          // Add the current stroke as a new path
           newPaths.push(simplifyPath(currentPath, epsilon));
+          newProcessedPaths.push(simplifyPath(currentPath, epsilon));
         }
-  
-        setOriginalPaths(newOriginalPaths);
+        
+        setProcessedPaths(newProcessedPaths);
         redrawCanvas(newPaths);
         return newPaths;
       });
@@ -369,28 +373,33 @@ const DrawingApp = () => {
     });
   };
 
-  const undoLastConnection = () => {
-    if (isUndoUsed) return; // Do nothing if undo has already been used for the recent stroke
-
-    setPaths(prevPaths => {
-      if (prevPaths.length === 0) return prevPaths; // Nothing to undo
-
-      const newPaths = [...prevPaths];
-      const lastPath = newPaths.pop(); // Remove the last simplified path
-
-      const newOriginalPaths = [...originalPaths];
-      const lastOriginalPath = newOriginalPaths.pop(); // Remove the corresponding original path
-
-      // Replace the last simplified path with the original path
-      if (lastOriginalPath) {
-        newPaths.push(lastOriginalPath);
-      }
-
-      redrawCanvas(newPaths);
-
-      setIsUndoUsed(true); // Mark undo as used
-      return newPaths;
-    });
+  const undoLastProcessing = () => {
+    if (originalPaths.length === 0 || paths.length === 0) return;
+    
+    // Get the last original and processed paths
+    const lastOriginalPath = originalPaths[originalPaths.length - 1];
+    const lastProcessedPath = processedPaths[processedPaths.length - 1];
+    
+    // Check if the last path in the current display matches the last processed path
+    if (JSON.stringify(paths[paths.length - 1]) === JSON.stringify(lastProcessedPath)) {
+      // Replace the processed path with the original path
+      setPaths(prevPaths => {
+        const newPaths = [...prevPaths.slice(0, -1), lastOriginalPath];
+        redrawCanvas(newPaths);
+        return newPaths;
+      });
+    } else {
+      // If the last path is already the original, do nothing or optionally remove it
+      // This handles the case where undo is pressed multiple times
+      setPaths(prevPaths => {
+        if (prevPaths.length > originalPaths.length) {
+          const newPaths = prevPaths.slice(0, -1);
+          redrawCanvas(newPaths);
+          return newPaths;
+        }
+        return prevPaths;
+      });
+    }
   };
 
   const downloadSVG = () => {
@@ -405,6 +414,9 @@ const DrawingApp = () => {
       if (path.isCircle) {
         // Add circle to SVG
         svgContent += `<circle cx="${path.center.x}" cy="${path.center.y}" r="${path.radius}" stroke="black" fill="none" stroke-width="5" />`;
+      } else if (path.isEllipse) {
+        // Add ellipse to SVG
+        svgContent += `<ellipse cx="${path.center.x}" cy="${path.center.y}" rx="${path.majorAxis}" ry="${path.minorAxis}" transform="rotate(${path.angle * (180/Math.PI)} ${path.center.x} ${path.center.y})" stroke="black" fill="none" stroke-width="5" />`;
       } else {
         // Add path to SVG
         svgContent += `<path d="M ${path[0].x} ${path[0].y} ${path
@@ -439,7 +451,7 @@ const DrawingApp = () => {
       <div className="mt-4 flex gap-2">
         <button onClick={() => setTool("pencil")} className="p-2 bg-blue-500 text-white rounded-lg">✏️ Pencil</button>
         <button onClick={() => setTool("eraser")} className="p-2 bg-gray-500 text-white rounded-lg">🧽 Eraser</button>
-        <button onClick={undoLastConnection} className="p-2 bg-red-500 text-white rounded-lg">Undo</button>
+        <button onClick={undoLastProcessing} className="p-2 bg-red-500 text-white rounded-lg">Undo Processing</button>
         <button onClick={downloadSVG} className="p-2 bg-green-500 text-white rounded-lg">Download SVG</button>
       </div>
       <div className="mt-4">

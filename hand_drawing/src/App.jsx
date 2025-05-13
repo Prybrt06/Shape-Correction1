@@ -40,28 +40,40 @@ const simplifyPath = (points, epsilon) => {
   return simplified;
 };
 
-const regularizeFreehandCurve = (points, epsilon) => {
+const regularizeFreehandCurve = (points, epsilon, shouldClose = false) => {
   if (points.length < 5) return points;
 
+  // Keep the original starting point fixed
+  const originalStartPoint = points[0];
+  
   const fitted = fitCircle(points);
   if (fitted) {
     const { center, radius } = fitted;
     const angleStep = (2 * Math.PI) / points.length;
 
-    return points.map((_, i) => {
+    const regularized = points.map((_, i) => {
       const angle = i * angleStep;
       return {
         x: center.x + radius * Math.cos(angle),
         y: center.y + radius * Math.sin(angle),
       };
     });
+
+    // Ensure the first point stays exactly where it was drawn
+    if (shouldClose) {
+      regularized.push({...originalStartPoint});
+    } else {
+      regularized[0] = {...originalStartPoint};
+    }
+    return regularized;
   }
 
-  const smoothed = [];
+  // Apply smoothing while keeping the first point fixed
+  const smoothed = [{...points[0]}]; // Keep original first point
   const windowSize = 5;
   const halfWindow = Math.floor(windowSize / 2);
 
-  for (let i = 0; i < points.length; i++) {
+  for (let i = 1; i < points.length; i++) {
     let sumX = 0, sumY = 0, count = 0;
 
     for (let j = i - halfWindow; j <= i + halfWindow; j++) {
@@ -75,7 +87,15 @@ const regularizeFreehandCurve = (points, epsilon) => {
     smoothed.push({ x: sumX / count, y: sumY / count });
   }
 
-  return simplifyPath(smoothed, epsilon / 2);
+  const simplified = simplifyPath(smoothed, epsilon / 2);
+  
+  // Ensure the first point stays exactly where it was drawn
+  simplified[0] = {...originalStartPoint};
+  if (shouldClose) {
+    simplified.push({...originalStartPoint});
+  }
+  
+  return simplified;
 };
 
 const fitCircle = (points) => {
@@ -147,9 +167,10 @@ const DrawingApp = () => {
   const [paths, setPaths] = useState([]);
   const [originalPaths, setOriginalPaths] = useState([]);
   const [tool, setTool] = useState("pencil");
-  const [isUndoUsed, setIsUndoUsed] = useState(false);
   const [epsilon, setEpsilon] = useState(1.0);
+  const [isRegularized, setIsRegularized] = useState([]);
   const connectionThreshold = 20;
+  const closeThreshold = 15; // Threshold to close a stroke
   let currentPath = [];
 
   useEffect(() => {
@@ -173,6 +194,14 @@ const DrawingApp = () => {
         context.arc(path.center.x, path.center.y, path.radius, 0, 2 * Math.PI);
         context.stroke();
         context.closePath();
+      } else if (path.isClosed) {
+        context.beginPath();
+        context.moveTo(path[0].x, path[0].y);
+        path.forEach((point) => {
+          context.lineTo(point.x, point.y);
+        });
+        context.closePath();
+        context.stroke();
       } else {
         context.beginPath();
         context.moveTo(path[0].x, path[0].y);
@@ -180,7 +209,6 @@ const DrawingApp = () => {
           context.lineTo(point.x, point.y);
         });
         context.stroke();
-        context.closePath();
       }
     });
   };
@@ -195,7 +223,6 @@ const DrawingApp = () => {
     contextRef.current.beginPath();
     contextRef.current.moveTo(offsetX, offsetY);
     currentPath = [{ x: offsetX, y: offsetY }];
-    setIsUndoUsed(false);
   };
 
   const draw = ({ nativeEvent }) => {
@@ -210,52 +237,63 @@ const DrawingApp = () => {
     setIsDrawing(false);
     if (currentPath.length < 2) return;
 
-    const circle = fitCircle(currentPath);
+    // Check if stroke should be closed
+    const shouldClose = distance(currentPath[0], currentPath[currentPath.length - 1]) < closeThreshold;
+    
+    setPaths((prevPaths) => {
+      const newPaths = [...prevPaths];
+      const newOriginalPaths = [...originalPaths];
+      const newIsRegularized = [...isRegularized];
 
-    if (circle) {
-      setPaths((prevPaths) => {
-        const newPaths = [...prevPaths, { isCircle: true, ...circle }];
-        setOriginalPaths((prevOriginalPaths) => [...prevOriginalPaths, currentPath]);
-        redrawCanvas(newPaths);
-        return newPaths;
-      });
-    } else {
-      setPaths((prevPaths) => {
-        let newPaths = [...prevPaths];
-        let newOriginalPaths = [...originalPaths];
+      // First check if we should connect to previous path
+      if (newPaths.length > 0 && newOriginalPaths.length > 0) {
+        const lastOriginal = newOriginalPaths[newOriginalPaths.length - 1];
+        const lastPoint = lastOriginal[lastOriginal.length - 1];
+        const firstPoint = currentPath[0];
 
-        if (prevPaths.length > 0) {
-          const lastOriginal = newOriginalPaths[newOriginalPaths.length - 1];
-          const lastPoint = lastOriginal[lastOriginal.length - 1];
-          const firstPoint = currentPath[0];
+        if (distance(lastPoint, firstPoint) < connectionThreshold) {
+          // Connect the paths first
+          const midPoint = {
+            x: (lastPoint.x + firstPoint.x) / 2,
+            y: (lastPoint.y + firstPoint.y) / 2,
+          };
 
-          if (distance(lastPoint, firstPoint) < connectionThreshold) {
-            const midPoint = {
-              x: (lastPoint.x + firstPoint.x) / 2,
-              y: (lastPoint.y + firstPoint.y) / 2,
-            };
+          newOriginalPaths.pop();
+          const mergedPath = [...lastOriginal, midPoint, ...currentPath];
+          newOriginalPaths.push(mergedPath);
 
-            newOriginalPaths.pop();
-            const mergedPath = [...lastOriginal, midPoint, ...currentPath];
-            newOriginalPaths.push(mergedPath);
-
-            const newRegularized = regularizeFreehandCurve(mergedPath, epsilon);
-            newPaths.pop();
-            newPaths.push(newRegularized);
-          } else {
-            newOriginalPaths.push(currentPath);
-            newPaths.push(regularizeFreehandCurve(currentPath, epsilon));
-          }
-        } else {
-          newOriginalPaths.push(currentPath);
-          newPaths.push(regularizeFreehandCurve(currentPath, epsilon));
+          // Then regularize the connected path
+          const newRegularized = regularizeFreehandCurve(mergedPath, epsilon);
+          newPaths.pop();
+          newPaths.push(newRegularized);
+          newIsRegularized.pop();
+          newIsRegularized.push(true);
+          
+          setOriginalPaths(newOriginalPaths);
+          setIsRegularized(newIsRegularized);
+          redrawCanvas(newPaths);
+          return newPaths;
         }
+      }
 
-        setOriginalPaths(newOriginalPaths);
-        redrawCanvas(newPaths);
-        return newPaths;
-      });
-    }
+      // If not connecting, process as new stroke
+      const circle = fitCircle(currentPath);
+      if (circle) {
+        newPaths.push({ isCircle: true, ...circle });
+        newOriginalPaths.push(currentPath);
+        newIsRegularized.push(true);
+      } else {
+        const regularized = regularizeFreehandCurve(currentPath, epsilon, shouldClose);
+        newOriginalPaths.push(currentPath);
+        newPaths.push(shouldClose ? [...regularized, {isClosed: true}] : regularized);
+        newIsRegularized.push(true);
+      }
+
+      setOriginalPaths(newOriginalPaths);
+      setIsRegularized(newIsRegularized);
+      redrawCanvas(newPaths);
+      return newPaths;
+    });
   };
 
   const eraseStroke = (x, y) => {
@@ -283,24 +321,32 @@ const DrawingApp = () => {
     });
   };
 
-  const undoLastConnection = () => {
-    if (isUndoUsed) return;
-
+  const undoLastRegularization = () => {
     setPaths((prevPaths) => {
-      if (prevPaths.length === 0) return prevPaths;
+      if (prevPaths.length === 0 || originalPaths.length === 0) return prevPaths;
 
       const newPaths = [...prevPaths];
-      const newOriginalPaths = [...originalPaths];
-      const lastOriginalPath = newOriginalPaths.pop();
-
-      if (lastOriginalPath) {
-        newPaths.pop();
-        newPaths.push(regularizeFreehandCurve(lastOriginalPath, epsilon));
+      const newIsRegularized = [...isRegularized];
+      
+      // Find the last regularized path
+      let lastRegularizedIndex = -1;
+      for (let i = newIsRegularized.length - 1; i >= 0; i--) {
+        if (newIsRegularized[i]) {
+          lastRegularizedIndex = i;
+          break;
+        }
       }
 
-      redrawCanvas(newPaths);
+      if (lastRegularizedIndex === -1) return prevPaths;
 
-      setIsUndoUsed(true);
+      // Replace the regularized path with the original
+      const originalPath = originalPaths[lastRegularizedIndex];
+      const shouldClose = distance(originalPath[0], originalPath[originalPath.length - 1]) < closeThreshold;
+      newPaths[lastRegularizedIndex] = shouldClose ? [...originalPath, {isClosed: true}] : originalPath;
+      newIsRegularized[lastRegularizedIndex] = false;
+      
+      setIsRegularized(newIsRegularized);
+      redrawCanvas(newPaths);
       return newPaths;
     });
   };
@@ -315,12 +361,16 @@ const DrawingApp = () => {
     paths.forEach((path) => {
       if (path.isCircle) {
         svgContent += `<circle cx="${path.center.x}" cy="${path.center.y}" r="${path.radius}" stroke="black" fill="none" stroke-width="5" />`;
+      } else if (path.isClosed) {
+        svgContent += `<path d="M ${path[0].x} ${path[0].y} ${path
+          .slice(1)
+          .map((point) => `L ${point.x} ${point.y}`)
+          .join(" ")} Z" stroke="black" fill="none" stroke-width="5" stroke-linecap="round" />`;
       } else {
         svgContent += `<path d="M ${path[0].x} ${path[0].y} ${path
+          .slice(1)
           .map((point) => `L ${point.x} ${point.y}`)
-          .join(
-            " "
-          )}" stroke="black" fill="none" stroke-width="5" stroke-linecap="round" />`;
+          .join(" ")}" stroke="black" fill="none" stroke-width="5" stroke-linecap="round" />`;
       }
     });
 
@@ -360,10 +410,10 @@ const DrawingApp = () => {
           🧽 Eraser
         </button>
         <button
-          onClick={undoLastConnection}
+          onClick={undoLastRegularization}
           className="p-2 bg-red-500 text-white rounded-lg"
         >
-          Undo
+          Undo Regularization
         </button>
         <button
           onClick={downloadSVG}
@@ -372,15 +422,9 @@ const DrawingApp = () => {
           Download SVG
         </button>
       </div>
-      <div className="mt-4">
-        <label
-          htmlFor="epsilon-slider"
-          className="block text-sm font-medium text-gray-700"
-        >
-          Epsilon (Regularization Strength): {epsilon}
-        </label>
+      <div className="mt-4 flex items-center">
+        <span className="text-2xl mr-2">~</span>
         <input
-          id="epsilon-slider"
           type="range"
           min="1"
           max="50"
@@ -388,6 +432,7 @@ const DrawingApp = () => {
           onChange={(e) => setEpsilon(parseFloat(e.target.value))}
           className="w-64"
         />
+        <span className="text-2xl ml-2">/</span>
       </div>
     </div>
   );
