@@ -1,7 +1,17 @@
 import React, { useRef, useEffect, useState } from "react";
 
+// Utility functions
 const distance = (p1, p2) => Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
+const angleBetweenLines = (p1, p2, p3) => {
+  const v1 = { x: p1.x - p2.x, y: p1.y - p2.y };
+  const v2 = { x: p3.x - p2.x, y: p3.y - p2.y };
+  const dot = v1.x * v2.x + v1.y * v2.y;
+  const mag1 = Math.sqrt(v1.x ** 2 + v1.y ** 2);
+  const mag2 = Math.sqrt(v2.x ** 2 + v2.y ** 2);
+  return Math.acos(dot / (mag1 * mag2)) * (180 / Math.PI);
+};
 
+// Path simplification using Ramer-Douglas-Peucker algorithm
 const simplifyPath = (points, epsilon) => {
   if (points.length < 3) return points;
 
@@ -40,64 +50,54 @@ const simplifyPath = (points, epsilon) => {
   return simplified;
 };
 
-const regularizeFreehandCurve = (points, epsilon, shouldClose = false) => {
-  if (points.length < 5) return points;
+// Detect if points form a rectangle
+const detectRectangle = (points, angleThreshold = 10) => {
+  if (points.length < 4) return null;
 
-  // Keep the original starting point fixed
-  const originalStartPoint = points[0];
-  
-  const fitted = fitCircle(points);
-  if (fitted) {
-    const { center, radius } = fitted;
-    const angleStep = (2 * Math.PI) / points.length;
+  // Simplify to find corners
+  const simplified = simplifyPath(points, 10);
+  if (simplified.length !== 4 && simplified.length !== 5) return null;
 
-    const regularized = points.map((_, i) => {
-      const angle = i * angleStep;
-      return {
-        x: center.x + radius * Math.cos(angle),
-        y: center.y + radius * Math.sin(angle),
-      };
-    });
+  // Check if closed shape
+  const isClosed = distance(simplified[0], simplified[simplified.length - 1]) < 20;
+  const corners = isClosed ? simplified.slice(0, 4) : simplified;
+  if (corners.length !== 4) return null;
 
-    // Ensure the first point stays exactly where it was drawn
-    if (shouldClose) {
-      regularized.push({...originalStartPoint});
-    } else {
-      regularized[0] = {...originalStartPoint};
-    }
-    return regularized;
+  // Calculate angles between adjacent lines
+  const angles = [];
+  for (let i = 0; i < 4; i++) {
+    const p1 = corners[i];
+    const p2 = corners[(i + 1) % 4];
+    const p3 = corners[(i + 2) % 4];
+    angles.push(angleBetweenLines(p1, p2, p3));
   }
 
-  // Apply smoothing while keeping the first point fixed
-  const smoothed = [{...points[0]}]; // Keep original first point
-  const windowSize = 5;
-  const halfWindow = Math.floor(windowSize / 2);
+  // Check if all angles are approximately 90 degrees
+  if (!angles.every(angle => Math.abs(angle - 90) < angleThreshold)) return null;
 
-  for (let i = 1; i < points.length; i++) {
-    let sumX = 0, sumY = 0, count = 0;
+  // Calculate bounding rectangle
+  const xs = corners.map(p => p.x);
+  const ys = corners.map(p => p.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
 
-    for (let j = i - halfWindow; j <= i + halfWindow; j++) {
-      if (j >= 0 && j < points.length) {
-        sumX += points[j].x;
-        sumY += points[j].y;
-        count++;
-      }
-    }
-
-    smoothed.push({ x: sumX / count, y: sumY / count });
-  }
-
-  const simplified = simplifyPath(smoothed, epsilon / 2);
-  
-  // Ensure the first point stays exactly where it was drawn
-  simplified[0] = {...originalStartPoint};
-  if (shouldClose) {
-    simplified.push({...originalStartPoint});
-  }
-  
-  return simplified;
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+    corners: [
+      { x: minX, y: minY },
+      { x: maxX, y: minY },
+      { x: maxX, y: maxY },
+      { x: minX, y: maxY }
+    ]
+  };
 };
 
+// Fit circle to points
 const fitCircle = (points) => {
   const n = points.length;
   if (n < 10) return null;
@@ -132,6 +132,7 @@ const fitCircle = (points) => {
     ) / n
   );
 
+  // Check if points actually form a circle
   const distances = points.map(({ x, y }) =>
     Math.abs(Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2) - radius)
   );
@@ -160,6 +161,64 @@ const fitCircle = (points) => {
   return null;
 };
 
+// Regularize path into perfect shapes if detected
+const regularizeFreehandCurve = (points, epsilon, shouldClose = false) => {
+  if (points.length < 5) return points;
+
+  // First check for rectangle
+  const rectangle = detectRectangle(points);
+  if (rectangle) {
+    return [...rectangle.corners, { ...rectangle.corners[0], isClosed: true }];
+  }
+
+  // Then check for circle
+  const circle = fitCircle(points);
+  if (circle) {
+    const { center, radius } = circle;
+    const angleStep = (2 * Math.PI) / points.length;
+
+    const regularized = points.map((_, i) => {
+      const angle = i * angleStep;
+      return {
+        x: center.x + radius * Math.cos(angle),
+        y: center.y + radius * Math.sin(angle),
+      };
+    });
+
+    if (shouldClose) {
+      regularized.push({...points[0]});
+    }
+    return regularized;
+  }
+
+  // Apply smoothing if not a perfect shape
+  const smoothed = [{...points[0]}];
+  const windowSize = 5;
+  const halfWindow = Math.floor(windowSize / 2);
+
+  for (let i = 1; i < points.length; i++) {
+    let sumX = 0, sumY = 0, count = 0;
+
+    for (let j = i - halfWindow; j <= i + halfWindow; j++) {
+      if (j >= 0 && j < points.length) {
+        sumX += points[j].x;
+        sumY += points[j].y;
+        count++;
+      }
+    }
+
+    smoothed.push({ x: sumX / count, y: sumY / count });
+  }
+
+  const simplified = simplifyPath(smoothed, epsilon / 2);
+  simplified[0] = {...points[0]};
+  if (shouldClose) {
+    simplified.push({...points[0]});
+  }
+  
+  return simplified;
+};
+
 const DrawingApp = () => {
   const canvasRef = useRef(null);
   const contextRef = useRef(null);
@@ -170,9 +229,10 @@ const DrawingApp = () => {
   const [epsilon, setEpsilon] = useState(1.0);
   const [isRegularized, setIsRegularized] = useState([]);
   const connectionThreshold = 20;
-  const closeThreshold = 15; // Threshold to close a stroke
+  const closeThreshold = 15;
   let currentPath = [];
 
+  // Initialize canvas
   useEffect(() => {
     const canvas = canvasRef.current;
     canvas.width = 800;
@@ -185,6 +245,7 @@ const DrawingApp = () => {
     contextRef.current = context;
   }, []);
 
+  // Redraw all paths
   const redrawCanvas = (updatedPaths) => {
     const context = contextRef.current;
     context.clearRect(0, 0, 800, 500);
@@ -193,26 +254,31 @@ const DrawingApp = () => {
         context.beginPath();
         context.arc(path.center.x, path.center.y, path.radius, 0, 2 * Math.PI);
         context.stroke();
+      } else if (path.isClosed && path.length === 5 && path[4].isClosed) {
+        // Draw rectangle
+        context.beginPath();
+        context.moveTo(path[0].x, path[0].y);
+        for (let i = 1; i < 4; i++) {
+          context.lineTo(path[i].x, path[i].y);
+        }
         context.closePath();
+        context.stroke();
       } else if (path.isClosed) {
         context.beginPath();
         context.moveTo(path[0].x, path[0].y);
-        path.forEach((point) => {
-          context.lineTo(point.x, point.y);
-        });
+        path.slice(1).forEach(point => context.lineTo(point.x, point.y));
         context.closePath();
         context.stroke();
       } else {
         context.beginPath();
         context.moveTo(path[0].x, path[0].y);
-        path.forEach((point) => {
-          context.lineTo(point.x, point.y);
-        });
+        path.slice(1).forEach(point => context.lineTo(point.x, point.y));
         context.stroke();
       }
     });
   };
 
+  // Start drawing
   const startDrawing = ({ nativeEvent }) => {
     const { offsetX, offsetY } = nativeEvent;
     if (tool === "eraser") {
@@ -225,6 +291,7 @@ const DrawingApp = () => {
     currentPath = [{ x: offsetX, y: offsetY }];
   };
 
+  // Draw stroke
   const draw = ({ nativeEvent }) => {
     if (!isDrawing) return;
     const { offsetX, offsetY } = nativeEvent;
@@ -233,6 +300,7 @@ const DrawingApp = () => {
     currentPath.push({ x: offsetX, y: offsetY });
   };
 
+  // Stop drawing and process stroke
   const stopDrawing = () => {
     setIsDrawing(false);
     if (currentPath.length < 2) return;
@@ -277,17 +345,10 @@ const DrawingApp = () => {
       }
 
       // If not connecting, process as new stroke
-      const circle = fitCircle(currentPath);
-      if (circle) {
-        newPaths.push({ isCircle: true, ...circle });
-        newOriginalPaths.push(currentPath);
-        newIsRegularized.push(true);
-      } else {
-        const regularized = regularizeFreehandCurve(currentPath, epsilon, shouldClose);
-        newOriginalPaths.push(currentPath);
-        newPaths.push(shouldClose ? [...regularized, {isClosed: true}] : regularized);
-        newIsRegularized.push(true);
-      }
+      const regularized = regularizeFreehandCurve(currentPath, epsilon, shouldClose);
+      newOriginalPaths.push(currentPath);
+      newPaths.push(shouldClose ? [...regularized, {isClosed: true}] : regularized);
+      newIsRegularized.push(true);
 
       setOriginalPaths(newOriginalPaths);
       setIsRegularized(newIsRegularized);
@@ -296,6 +357,7 @@ const DrawingApp = () => {
     });
   };
 
+  // Erase stroke
   const eraseStroke = (x, y) => {
     setPaths((prevPaths) => {
       const newPaths = prevPaths.filter((path) => {
@@ -321,6 +383,7 @@ const DrawingApp = () => {
     });
   };
 
+  // Undo last regularization
   const undoLastRegularization = () => {
     setPaths((prevPaths) => {
       if (prevPaths.length === 0 || originalPaths.length === 0) return prevPaths;
@@ -351,6 +414,7 @@ const DrawingApp = () => {
     });
   };
 
+  // Download as SVG
   const downloadSVG = () => {
     const canvas = canvasRef.current;
     const width = canvas.width;
@@ -361,16 +425,13 @@ const DrawingApp = () => {
     paths.forEach((path) => {
       if (path.isCircle) {
         svgContent += `<circle cx="${path.center.x}" cy="${path.center.y}" r="${path.radius}" stroke="black" fill="none" stroke-width="5" />`;
+      } else if (path.isClosed && path.length === 5 && path[4].isClosed) {
+        // Rectangle
+        svgContent += `<path d="M ${path[0].x} ${path[0].y} L ${path[1].x} ${path[1].y} L ${path[2].x} ${path[2].y} L ${path[3].x} ${path[3].y} Z" stroke="black" fill="none" stroke-width="5" />`;
       } else if (path.isClosed) {
-        svgContent += `<path d="M ${path[0].x} ${path[0].y} ${path
-          .slice(1)
-          .map((point) => `L ${point.x} ${point.y}`)
-          .join(" ")} Z" stroke="black" fill="none" stroke-width="5" stroke-linecap="round" />`;
+        svgContent += `<path d="M ${path[0].x} ${path[0].y} ${path.slice(1).map(p => `L ${p.x} ${p.y}`).join(' ')} Z" stroke="black" fill="none" stroke-width="5" />`;
       } else {
-        svgContent += `<path d="M ${path[0].x} ${path[0].y} ${path
-          .slice(1)
-          .map((point) => `L ${point.x} ${point.y}`)
-          .join(" ")}" stroke="black" fill="none" stroke-width="5" stroke-linecap="round" />`;
+        svgContent += `<path d="M ${path[0].x} ${path[0].y} ${path.slice(1).map(p => `L ${p.x} ${p.y}`).join(' ')}" stroke="black" fill="none" stroke-width="5" />`;
       }
     });
 
