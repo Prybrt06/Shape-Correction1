@@ -51,7 +51,7 @@ const simplifyPath = (points, epsilon) => {
 };
 
 // Detect if points form a rectangle
-const detectRectangle = (points, angleThreshold = 10) => {
+const detectRectangle = (points, angleThreshold = 15) => {
   if (points.length < 4) return null;
 
   // Simplify to find corners
@@ -161,44 +161,86 @@ const fitCircle = (points) => {
   return null;
 };
 
-// Regularize path into perfect shapes if detected
-const regularizeFreehandCurve = (points, epsilon, shouldClose = false) => {
+// Fit ellipse to points (simplified approach)
+const fitEllipse = (points) => {
+  if (points.length < 10) return null;
+  
+  // Simple approach: use bounding box
+  const xs = points.map(p => p.x);
+  const ys = points.map(p => p.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  
+  const center = {
+    x: (minX + maxX) / 2,
+    y: (minY + maxY) / 2
+  };
+  
+  const rx = (maxX - minX) / 2;
+  const ry = (maxY - minY) / 2;
+  
+  // Check if it's actually ellipse-like
+  const startPoint = points[0];
+  const endPoint = points[points.length - 1];
+  const startEndDistance = distance(startPoint, endPoint);
+  
+  if (startEndDistance > 20) return null;
+  
+  return { center, rx, ry };
+};
+
+// Regularize path based on selected mode
+const regularizePath = (points, epsilon, mode, shouldClose = false) => {
   if (points.length < 5) return points;
 
-  // First check for rectangle
-  const rectangle = detectRectangle(points);
-  if (rectangle) {
-    return [...rectangle.corners, { ...rectangle.corners[0], isClosed: true }];
+  // Keep original starting point
+  const originalStartPoint = points[0];
+
+  // Process based on selected mode
+  switch (mode) {
+    case 'circle':
+      const circle = fitCircle(points);
+      if (circle) {
+        const { center, radius } = circle;
+        const angleStep = (2 * Math.PI) / points.length;
+        const regularized = points.map((_, i) => ({
+          x: center.x + radius * Math.cos(i * angleStep),
+          y: center.y + radius * Math.sin(i * angleStep),
+        }));
+        if (shouldClose) regularized.push({...originalStartPoint});
+        return regularized;
+      }
+      
+      const ellipse = fitEllipse(points);
+      if (ellipse) {
+        const { center, rx, ry } = ellipse;
+        const angleStep = (2 * Math.PI) / points.length;
+        const regularized = points.map((_, i) => ({
+          x: center.x + rx * Math.cos(i * angleStep),
+          y: center.y + ry * Math.sin(i * angleStep),
+        }));
+        if (shouldClose) regularized.push({...originalStartPoint});
+        return regularized;
+      }
+      break;
+
+    case 'rectangle':
+      const rectangle = detectRectangle(points);
+      if (rectangle) {
+        return [...rectangle.corners, { ...rectangle.corners[0], isClosed: true }];
+      }
+      break;
   }
 
-  // Then check for circle
-  const circle = fitCircle(points);
-  if (circle) {
-    const { center, radius } = circle;
-    const angleStep = (2 * Math.PI) / points.length;
-
-    const regularized = points.map((_, i) => {
-      const angle = i * angleStep;
-      return {
-        x: center.x + radius * Math.cos(angle),
-        y: center.y + radius * Math.sin(angle),
-      };
-    });
-
-    if (shouldClose) {
-      regularized.push({...points[0]});
-    }
-    return regularized;
-  }
-
-  // Apply smoothing if not a perfect shape
-  const smoothed = [{...points[0]}];
+  // Default: freehand with light regularization
+  const smoothed = [{...originalStartPoint}];
   const windowSize = 5;
   const halfWindow = Math.floor(windowSize / 2);
 
   for (let i = 1; i < points.length; i++) {
     let sumX = 0, sumY = 0, count = 0;
-
     for (let j = i - halfWindow; j <= i + halfWindow; j++) {
       if (j >= 0 && j < points.length) {
         sumX += points[j].x;
@@ -206,15 +248,12 @@ const regularizeFreehandCurve = (points, epsilon, shouldClose = false) => {
         count++;
       }
     }
-
     smoothed.push({ x: sumX / count, y: sumY / count });
   }
 
-  const simplified = simplifyPath(smoothed, epsilon / 2);
-  simplified[0] = {...points[0]};
-  if (shouldClose) {
-    simplified.push({...points[0]});
-  }
+  const simplified = simplifyPath(smoothed, mode === 'freehand' ? epsilon / 4 : epsilon / 2);
+  simplified[0] = {...originalStartPoint};
+  if (shouldClose) simplified.push({...originalStartPoint});
   
   return simplified;
 };
@@ -226,6 +265,7 @@ const DrawingApp = () => {
   const [paths, setPaths] = useState([]);
   const [originalPaths, setOriginalPaths] = useState([]);
   const [tool, setTool] = useState("pencil");
+  const [mode, setMode] = useState("freehand");
   const [epsilon, setEpsilon] = useState(1.0);
   const [isRegularized, setIsRegularized] = useState([]);
   const connectionThreshold = 20;
@@ -253,6 +293,14 @@ const DrawingApp = () => {
       if (path.isCircle) {
         context.beginPath();
         context.arc(path.center.x, path.center.y, path.radius, 0, 2 * Math.PI);
+        context.stroke();
+      } else if (path.isEllipse) {
+        context.beginPath();
+        context.ellipse(
+          path.center.x, path.center.y,
+          path.rx, path.ry,
+          0, 0, 2 * Math.PI
+        );
         context.stroke();
       } else if (path.isClosed && path.length === 5 && path[4].isClosed) {
         // Draw rectangle
@@ -331,7 +379,7 @@ const DrawingApp = () => {
           newOriginalPaths.push(mergedPath);
 
           // Then regularize the connected path
-          const newRegularized = regularizeFreehandCurve(mergedPath, epsilon);
+          const newRegularized = regularizePath(mergedPath, epsilon, mode);
           newPaths.pop();
           newPaths.push(newRegularized);
           newIsRegularized.pop();
@@ -345,9 +393,32 @@ const DrawingApp = () => {
       }
 
       // If not connecting, process as new stroke
-      const regularized = regularizeFreehandCurve(currentPath, epsilon, shouldClose);
+      const regularized = regularizePath(currentPath, epsilon, mode, shouldClose);
       newOriginalPaths.push(currentPath);
-      newPaths.push(shouldClose ? [...regularized, {isClosed: true}] : regularized);
+      
+      if (mode === 'circle' && shouldClose) {
+        const circle = fitCircle(currentPath);
+        if (circle) {
+          newPaths.push({ isCircle: true, ...circle });
+        } else {
+          const ellipse = fitEllipse(currentPath);
+          if (ellipse) {
+            newPaths.push({ isEllipse: true, ...ellipse });
+          } else {
+            newPaths.push(shouldClose ? [...regularized, {isClosed: true}] : regularized);
+          }
+        }
+      } else if (mode === 'rectangle' && shouldClose) {
+        const rectangle = detectRectangle(currentPath);
+        if (rectangle) {
+          newPaths.push([...rectangle.corners, { ...rectangle.corners[0], isClosed: true }]);
+        } else {
+          newPaths.push(shouldClose ? [...regularized, {isClosed: true}] : regularized);
+        }
+      } else {
+        newPaths.push(shouldClose ? [...regularized, {isClosed: true}] : regularized);
+      }
+      
       newIsRegularized.push(true);
 
       setOriginalPaths(newOriginalPaths);
@@ -361,8 +432,8 @@ const DrawingApp = () => {
   const eraseStroke = (x, y) => {
     setPaths((prevPaths) => {
       const newPaths = prevPaths.filter((path) => {
-        if (path.isCircle) {
-          return distance({ x, y }, path.center) > path.radius;
+        if (path.isCircle || path.isEllipse) {
+          return distance({ x, y }, path.center) > Math.max(path.radius || 0, path.rx || 0);
         } else {
           return !path.some((point, index) => {
             if (index === 0) return false;
@@ -425,6 +496,8 @@ const DrawingApp = () => {
     paths.forEach((path) => {
       if (path.isCircle) {
         svgContent += `<circle cx="${path.center.x}" cy="${path.center.y}" r="${path.radius}" stroke="black" fill="none" stroke-width="5" />`;
+      } else if (path.isEllipse) {
+        svgContent += `<ellipse cx="${path.center.x}" cy="${path.center.y}" rx="${path.rx}" ry="${path.ry}" stroke="black" fill="none" stroke-width="5" />`;
       } else if (path.isClosed && path.length === 5 && path[4].isClosed) {
         // Rectangle
         svgContent += `<path d="M ${path[0].x} ${path[0].y} L ${path[1].x} ${path[1].y} L ${path[2].x} ${path[2].y} L ${path[3].x} ${path[3].y} Z" stroke="black" fill="none" stroke-width="5" />`;
@@ -457,19 +530,44 @@ const DrawingApp = () => {
         onMouseLeave={stopDrawing}
         className="bg-white"
       />
+      
       <div className="mt-4 flex gap-2">
         <button
           onClick={() => setTool("pencil")}
-          className="p-2 bg-blue-500 text-white rounded-lg"
+          className={`p-2 rounded-lg ${tool === "pencil" ? "bg-blue-600 text-white" : "bg-gray-200 text-gray-800"}`}
         >
           ✏️ Pencil
         </button>
         <button
           onClick={() => setTool("eraser")}
-          className="p-2 bg-gray-500 text-white rounded-lg"
+          className={`p-2 rounded-lg ${tool === "eraser" ? "bg-blue-600 text-white" : "bg-gray-200 text-gray-800"}`}
         >
           🧽 Eraser
         </button>
+      </div>
+      
+      <div className="mt-4 flex gap-2">
+        <button
+          onClick={() => setMode("freehand")}
+          className={`p-2 rounded-lg ${mode === "freehand" ? "bg-green-600 text-white" : "bg-gray-200 text-gray-800"}`}
+        >
+          Freehand
+        </button>
+        <button
+          onClick={() => setMode("circle")}
+          className={`p-2 rounded-lg ${mode === "circle" ? "bg-green-600 text-white" : "bg-gray-200 text-gray-800"}`}
+        >
+          Circle/Ellipse
+        </button>
+        <button
+          onClick={() => setMode("rectangle")}
+          className={`p-2 rounded-lg ${mode === "rectangle" ? "bg-green-600 text-white" : "bg-gray-200 text-gray-800"}`}
+        >
+          Rectangle
+        </button>
+      </div>
+      
+      <div className="mt-4 flex gap-2">
         <button
           onClick={undoLastRegularization}
           className="p-2 bg-red-500 text-white rounded-lg"
@@ -483,6 +581,7 @@ const DrawingApp = () => {
           Download SVG
         </button>
       </div>
+      
       <div className="mt-4 flex items-center">
         <span className="text-2xl mr-2">~</span>
         <input
