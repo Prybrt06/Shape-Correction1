@@ -1,7 +1,17 @@
 import React, { useRef, useEffect, useState } from "react";
 
+// Utility functions
 const distance = (p1, p2) => Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
+const angleBetweenLines = (p1, p2, p3) => {
+  const v1 = { x: p1.x - p2.x, y: p1.y - p2.y };
+  const v2 = { x: p3.x - p2.x, y: p3.y - p2.y };
+  const dot = v1.x * v2.x + v1.y * v2.y;
+  const mag1 = Math.sqrt(v1.x ** 2 + v1.y ** 2);
+  const mag2 = Math.sqrt(v2.x ** 2 + v2.y ** 2);
+  return Math.acos(dot / (mag1 * mag2)) * (180 / Math.PI);
+};
 
+// Path simplification using Ramer-Douglas-Peucker algorithm
 const simplifyPath = (points, epsilon) => {
   if (points.length < 3) return points;
 
@@ -40,10 +50,57 @@ const simplifyPath = (points, epsilon) => {
   return simplified;
 };
 
-// Least Squares Circle Fitting Algorithm
+// Detect if points form a rectangle
+const detectRectangle = (points, angleThreshold = 15) => {
+  if (points.length < 4) return null;
+
+  // Simplify to find corners
+  const simplified = simplifyPath(points, 10);
+  if (simplified.length !== 4 && simplified.length !== 5) return null;
+
+  // Check if closed shape
+  const isClosed = distance(simplified[0], simplified[simplified.length - 1]) < 20;
+  const corners = isClosed ? simplified.slice(0, 4) : simplified;
+  if (corners.length !== 4) return null;
+
+  // Calculate angles between adjacent lines
+  const angles = [];
+  for (let i = 0; i < 4; i++) {
+    const p1 = corners[i];
+    const p2 = corners[(i + 1) % 4];
+    const p3 = corners[(i + 2) % 4];
+    angles.push(angleBetweenLines(p1, p2, p3));
+  }
+
+  // Check if all angles are approximately 90 degrees
+  if (!angles.every(angle => Math.abs(angle - 90) < angleThreshold)) return null;
+
+  // Calculate bounding rectangle
+  const xs = corners.map(p => p.x);
+  const ys = corners.map(p => p.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+    corners: [
+      { x: minX, y: minY },
+      { x: maxX, y: minY },
+      { x: maxX, y: maxY },
+      { x: minX, y: maxY }
+    ]
+  };
+};
+
+// Fit circle to points
 const fitCircle = (points) => {
   const n = points.length;
-  if (n < 10) return null; // Minimum points to consider for a circle
+  if (n < 10) return null;
 
   let sumX = 0, sumY = 0, sumX2 = 0, sumY2 = 0, sumX3 = 0, sumY3 = 0, sumXY = 0, sumX1Y2 = 0, sumX2Y1 = 0;
 
@@ -68,41 +125,35 @@ const fitCircle = (points) => {
   const centerX = (D * C - B * E) / (A * C - B * B);
   const centerY = (A * E - B * D) / (A * C - B * B);
 
-  const radius = Math.sqrt(points.reduce((sum, { x, y }) => sum + (x - centerX) ** 2 + (y - centerY) ** 2, 0) / n);
+  const radius = Math.sqrt(
+    points.reduce(
+      (sum, { x, y }) => sum + (x - centerX) ** 2 + (y - centerY) ** 2,
+      0
+    ) / n
+  );
 
-  // Calculate the variance of the distances from the center
-  const distances = points.map(({ x, y }) => Math.abs(Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2) - radius));
+  // Check if points actually form a circle
+  const distances = points.map(({ x, y }) =>
+    Math.abs(Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2) - radius)
+  );
   const variance = distances.reduce((sum, dist) => sum + dist ** 2, 0) / n;
 
-  // Check if the points are close to the fitted circle
-  const maxDeviation = Math.max(...distances);
-
-  // Check the aspect ratio of the bounding box
-  const minX = Math.min(...points.map(p => p.x));
-  const maxX = Math.max(...points.map(p => p.x));
-  const minY = Math.min(...points.map(p => p.y));
-  const maxY = Math.max(...points.map(p => p.y));
+  const minX = Math.min(...points.map((p) => p.x));
+  const maxX = Math.max(...points.map((p) => p.x));
+  const minY = Math.min(...points.map((p) => p.y));
+  const maxY = Math.max(...points.map((p) => p.y));
   const width = maxX - minX;
   const height = maxY - minY;
   const aspectRatio = Math.max(width, height) / Math.min(width, height);
 
-  // Check if the start and end points are close to each other
   const startPoint = points[0];
   const endPoint = points[points.length - 1];
   const startEndDistance = distance(startPoint, endPoint);
 
-  // Thresholds for circle detection
-  const circleThresholds = {
-    variance: 100, // Maximum allowed variance
-    aspectRatio: 2, // Maximum allowed aspect ratio
-    startEndDistance: 20, // Maximum allowed distance between start and end points
-  };
-
-  // If all thresholds are satisfied, consider it a circle
   if (
-    variance < circleThresholds.variance &&
-    aspectRatio < circleThresholds.aspectRatio &&
-    startEndDistance < circleThresholds.startEndDistance
+    variance < 30 &&
+    aspectRatio < 2 &&
+    startEndDistance < 20
   ) {
     return { center: { x: centerX, y: centerY }, radius };
   }
@@ -110,57 +161,101 @@ const fitCircle = (points) => {
   return null;
 };
 
+// Fit ellipse to points (simplified approach)
 const fitEllipse = (points) => {
-  const n = points.length;
-  if (n < 10) return null; // Minimum points to consider for an ellipse
-
-  // Calculate the centroid (center) of the points
-  const centroid = points.reduce(
-    (acc, { x, y }) => ({ x: acc.x + x, y: acc.y + y }),
-    { x: 0, y: 0 }
-  );
-  centroid.x /= n;
-  centroid.y /= n;
-
-  // Center the points by subtracting the centroid
-  const centeredPoints = points.map(({ x, y }) => ({
-    x: x - centroid.x,
-    y: y - centroid.y,
-  }));
-
-  // Calculate the covariance matrix
-  let covXX = 0,
-    covYY = 0,
-    covXY = 0;
-  centeredPoints.forEach(({ x, y }) => {
-    covXX += x * x;
-    covYY += y * y;
-    covXY += x * y;
-  });
-  covXX /= n;
-  covYY /= n;
-  covXY /= n;
-
-  // Calculate the eigenvalues and eigenvectors of the covariance matrix
-  const discriminant = Math.sqrt((covXX - covYY) ** 2 + 4 * covXY ** 2);
-  const lambda1 = (covXX + covYY + discriminant) / 2; // Major axis eigenvalue
-  const lambda2 = (covXX + covYY - discriminant) / 2; // Minor axis eigenvalue
-
-  // Calculate the rotation angle (in radians)
-  const angle = 0.5 * Math.atan2(2 * covXY, covXX - covYY);
-
-  // Calculate the major and minor axes
-  // Scale the axes based on the standard deviation of the points
-  const majorAxis = Math.sqrt(lambda1) * 1.4; // Scale by 2 to match the spread
-  const minorAxis = Math.sqrt(lambda2) * 1.4; // Scale by 2 to match the spread
-
-  return {
-    type: "ellipse",
-    center: centroid,
-    majorAxis,
-    minorAxis,
-    angle, // Rotation angle in radians
+  if (points.length < 10) return null;
+  
+  // Simple approach: use bounding box
+  const xs = points.map(p => p.x);
+  const ys = points.map(p => p.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  
+  const center = {
+    x: (minX + maxX) / 2,
+    y: (minY + maxY) / 2
   };
+  
+  const rx = (maxX - minX) / 2;
+  const ry = (maxY - minY) / 2;
+  
+  // Check if it's actually ellipse-like
+  const startPoint = points[0];
+  const endPoint = points[points.length - 1];
+  const startEndDistance = distance(startPoint, endPoint);
+  
+  if (startEndDistance > 20) return null;
+  
+  return { center, rx, ry };
+};
+
+// Regularize path based on selected mode
+const regularizePath = (points, epsilon, mode, shouldClose = false) => {
+  if (points.length < 5) return points;
+
+  // Keep original starting point
+  const originalStartPoint = points[0];
+
+  // Process based on selected mode
+  switch (mode) {
+    case 'circle':
+      const circle = fitCircle(points);
+      if (circle) {
+        const { center, radius } = circle;
+        const angleStep = (2 * Math.PI) / points.length;
+        const regularized = points.map((_, i) => ({
+          x: center.x + radius * Math.cos(i * angleStep),
+          y: center.y + radius * Math.sin(i * angleStep),
+        }));
+        if (shouldClose) regularized.push({...originalStartPoint});
+        return regularized;
+      }
+      
+      const ellipse = fitEllipse(points);
+      if (ellipse) {
+        const { center, rx, ry } = ellipse;
+        const angleStep = (2 * Math.PI) / points.length;
+        const regularized = points.map((_, i) => ({
+          x: center.x + rx * Math.cos(i * angleStep),
+          y: center.y + ry * Math.sin(i * angleStep),
+        }));
+        if (shouldClose) regularized.push({...originalStartPoint});
+        return regularized;
+      }
+      break;
+
+    case 'rectangle':
+      const rectangle = detectRectangle(points);
+      if (rectangle) {
+        return [...rectangle.corners, { ...rectangle.corners[0], isClosed: true }];
+      }
+      break;
+  }
+
+  // Default: freehand with light regularization
+  const smoothed = [{...originalStartPoint}];
+  const windowSize = 5;
+  const halfWindow = Math.floor(windowSize / 2);
+
+  for (let i = 1; i < points.length; i++) {
+    let sumX = 0, sumY = 0, count = 0;
+    for (let j = i - halfWindow; j <= i + halfWindow; j++) {
+      if (j >= 0 && j < points.length) {
+        sumX += points[j].x;
+        sumY += points[j].y;
+        count++;
+      }
+    }
+    smoothed.push({ x: sumX / count, y: sumY / count });
+  }
+
+  const simplified = simplifyPath(smoothed, mode === 'freehand' ? epsilon / 4 : epsilon / 2);
+  simplified[0] = {...originalStartPoint};
+  if (shouldClose) simplified.push({...originalStartPoint});
+  
+  return simplified;
 };
 
 const DrawingApp = () => {
@@ -170,11 +265,14 @@ const DrawingApp = () => {
   const [paths, setPaths] = useState([]);
   const [originalPaths, setOriginalPaths] = useState([]);
   const [tool, setTool] = useState("pencil");
-  const [isUndoUsed, setIsUndoUsed] = useState(false); // Track if undo has been used for the recent stroke
-  const [epsilon, setEpsilon] = useState(20.0); // State for epsilon value
-  const connectionThreshold = 20; // Threshold for connecting strokes
+  const [mode, setMode] = useState("freehand");
+  const [epsilon, setEpsilon] = useState(1.0);
+  const [isRegularized, setIsRegularized] = useState([]);
+  const connectionThreshold = 20;
+  const closeThreshold = 15;
   let currentPath = [];
 
+  // Initialize canvas
   useEffect(() => {
     const canvas = canvasRef.current;
     canvas.width = 800;
@@ -187,27 +285,48 @@ const DrawingApp = () => {
     contextRef.current = context;
   }, []);
 
+  // Redraw all paths
   const redrawCanvas = (updatedPaths) => {
     const context = contextRef.current;
     context.clearRect(0, 0, 800, 500);
-    updatedPaths.forEach(path => {
+    updatedPaths.forEach((path) => {
       if (path.isCircle) {
         context.beginPath();
         context.arc(path.center.x, path.center.y, path.radius, 0, 2 * Math.PI);
         context.stroke();
+      } else if (path.isEllipse) {
+        context.beginPath();
+        context.ellipse(
+          path.center.x, path.center.y,
+          path.rx, path.ry,
+          0, 0, 2 * Math.PI
+        );
+        context.stroke();
+      } else if (path.isClosed && path.length === 5 && path[4].isClosed) {
+        // Draw rectangle
+        context.beginPath();
+        context.moveTo(path[0].x, path[0].y);
+        for (let i = 1; i < 4; i++) {
+          context.lineTo(path[i].x, path[i].y);
+        }
         context.closePath();
+        context.stroke();
+      } else if (path.isClosed) {
+        context.beginPath();
+        context.moveTo(path[0].x, path[0].y);
+        path.slice(1).forEach(point => context.lineTo(point.x, point.y));
+        context.closePath();
+        context.stroke();
       } else {
         context.beginPath();
         context.moveTo(path[0].x, path[0].y);
-        path.forEach(point => {
-          context.lineTo(point.x, point.y);
-        });
+        path.slice(1).forEach(point => context.lineTo(point.x, point.y));
         context.stroke();
-        context.closePath();
       }
     });
   };
 
+  // Start drawing
   const startDrawing = ({ nativeEvent }) => {
     const { offsetX, offsetY } = nativeEvent;
     if (tool === "eraser") {
@@ -218,9 +337,9 @@ const DrawingApp = () => {
     contextRef.current.beginPath();
     contextRef.current.moveTo(offsetX, offsetY);
     currentPath = [{ x: offsetX, y: offsetY }];
-    setIsUndoUsed(false); // Reset undo flag when starting a new stroke
   };
 
+  // Draw stroke
   const draw = ({ nativeEvent }) => {
     if (!isDrawing) return;
     const { offsetX, offsetY } = nativeEvent;
@@ -229,76 +348,103 @@ const DrawingApp = () => {
     currentPath.push({ x: offsetX, y: offsetY });
   };
 
+  // Stop drawing and process stroke
   const stopDrawing = () => {
     setIsDrawing(false);
-    if (currentPath.length < 2) return; // Minimum points to consider for simplification
+    if (currentPath.length < 2) return;
 
-    const circle = fitCircle(currentPath);
-    const ellipse = circle ? null : fitEllipse(currentPath);
-    if (circle) {
-      setPaths(prevPaths => {
-        const newPaths = [...prevPaths, { isCircle: true, ...circle }];
-        setOriginalPaths(prevOriginalPaths => [...prevOriginalPaths, currentPath]);
-        redrawCanvas(newPaths);
-        return newPaths;
-      });
-    } else {
-      setPaths(prevPaths => {
-        let newPaths = [...prevPaths];
-        let newOriginalPaths = [...originalPaths, currentPath];
+    // Check if stroke should be closed
+    const shouldClose = distance(currentPath[0], currentPath[currentPath.length - 1]) < closeThreshold;
+    
+    setPaths((prevPaths) => {
+      const newPaths = [...prevPaths];
+      const newOriginalPaths = [...originalPaths];
+      const newIsRegularized = [...isRegularized];
 
-        // Check if the last stroke's endpoint is close to the current stroke's starting point
-        if (prevPaths.length > 0) {
-          const lastPath = prevPaths[prevPaths.length - 1];
+      // First check if we should connect to previous path
+      if (newPaths.length > 0 && newOriginalPaths.length > 0) {
+        const lastOriginal = newOriginalPaths[newOriginalPaths.length - 1];
+        const lastPoint = lastOriginal[lastOriginal.length - 1];
+        const firstPoint = currentPath[0];
 
-          // Skip connection logic if the last stroke is a circle
-          if (!lastPath.isCircle) {
-            const lastPoint = lastPath[lastPath.length - 1];
-            const firstPoint = currentPath[0];
+        if (distance(lastPoint, firstPoint) < connectionThreshold) {
+          // Connect the paths first
+          const midPoint = {
+            x: (lastPoint.x + firstPoint.x) / 2,
+            y: (lastPoint.y + firstPoint.y) / 2,
+          };
 
-            if (distance(lastPoint, firstPoint) < connectionThreshold) {
-              // Connect the two strokes at their midpoint
-              const midPoint = {
-                x: (lastPoint.x + firstPoint.x) / 2,
-                y: (lastPoint.y + firstPoint.y) / 2,
-              };
+          newOriginalPaths.pop();
+          const mergedPath = [...lastOriginal, midPoint, ...currentPath];
+          newOriginalPaths.push(mergedPath);
 
-              // Merge the last stroke, midpoint, and current stroke
-              const mergedPath = [...lastPath, midPoint, ...currentPath];
-
-              // Remove the last stroke and add the merged stroke
-              newPaths.pop();
-              newPaths.push(simplifyPath(mergedPath, epsilon));
-            } else {
-              // Add the current stroke as a new path
-              newPaths.push(simplifyPath(currentPath, epsilon));
-            }
-          } else {
-            // Add the current stroke as a new path
-            newPaths.push(simplifyPath(currentPath, epsilon));
-          }
-        } else {
-          // Add the current stroke as a new path
-          newPaths.push(simplifyPath(currentPath, epsilon));
+          // Then regularize the connected path
+          const newRegularized = regularizePath(mergedPath, epsilon, mode);
+          newPaths.pop();
+          newPaths.push(newRegularized);
+          newIsRegularized.pop();
+          newIsRegularized.push(true);
+          
+          setOriginalPaths(newOriginalPaths);
+          setIsRegularized(newIsRegularized);
+          redrawCanvas(newPaths);
+          return newPaths;
         }
+      }
 
-        setOriginalPaths(newOriginalPaths);
-        redrawCanvas(newPaths);
-        return newPaths;
-      });
-    }
+      // If not connecting, process as new stroke
+      const regularized = regularizePath(currentPath, epsilon, mode, shouldClose);
+      newOriginalPaths.push(currentPath);
+      
+      if (mode === 'circle' && shouldClose) {
+        const circle = fitCircle(currentPath);
+        if (circle) {
+          newPaths.push({ isCircle: true, ...circle });
+        } else {
+          const ellipse = fitEllipse(currentPath);
+          if (ellipse) {
+            newPaths.push({ isEllipse: true, ...ellipse });
+          } else {
+            newPaths.push(shouldClose ? [...regularized, {isClosed: true}] : regularized);
+          }
+        }
+      } else if (mode === 'rectangle' && shouldClose) {
+        const rectangle = detectRectangle(currentPath);
+        if (rectangle) {
+          newPaths.push([...rectangle.corners, { ...rectangle.corners[0], isClosed: true }]);
+        } else {
+          newPaths.push(shouldClose ? [...regularized, {isClosed: true}] : regularized);
+        }
+      } else {
+        newPaths.push(shouldClose ? [...regularized, {isClosed: true}] : regularized);
+      }
+      
+      newIsRegularized.push(true);
+
+      setOriginalPaths(newOriginalPaths);
+      setIsRegularized(newIsRegularized);
+      redrawCanvas(newPaths);
+      return newPaths;
+    });
   };
 
+  // Erase stroke
   const eraseStroke = (x, y) => {
-    setPaths(prevPaths => {
-      const newPaths = prevPaths.filter(path => {
-        if (path.isCircle) {
-          return distance({ x, y }, path.center) > path.radius;
+    setPaths((prevPaths) => {
+      const newPaths = prevPaths.filter((path) => {
+        if (path.isCircle || path.isEllipse) {
+          return distance({ x, y }, path.center) > Math.max(path.radius || 0, path.rx || 0);
         } else {
           return !path.some((point, index) => {
             if (index === 0) return false;
             const prevPoint = path[index - 1];
-            const distToSegment = Math.abs((point.y - prevPoint.y) * x - (point.x - prevPoint.x) * y + point.x * prevPoint.y - point.y * prevPoint.x) / distance(point, prevPoint);
+            const distToSegment =
+              Math.abs(
+                (point.y - prevPoint.y) * x -
+                  (point.x - prevPoint.x) * y +
+                  point.x * prevPoint.y -
+                  point.y * prevPoint.x
+              ) / distance(point, prevPoint);
             return distToSegment < connectionThreshold;
           });
         }
@@ -308,53 +454,62 @@ const DrawingApp = () => {
     });
   };
 
-  const undoLastConnection = () => {
-    if (isUndoUsed) return; // Do nothing if undo has already been used for the recent stroke
-
-    setPaths(prevPaths => {
-      if (prevPaths.length === 0) return prevPaths; // Nothing to undo
+  // Undo last regularization
+  const undoLastRegularization = () => {
+    setPaths((prevPaths) => {
+      if (prevPaths.length === 0 || originalPaths.length === 0) return prevPaths;
 
       const newPaths = [...prevPaths];
-      const lastPath = newPaths.pop(); // Remove the last simplified path
-
-      const newOriginalPaths = [...originalPaths];
-      const lastOriginalPath = newOriginalPaths.pop(); // Remove the corresponding original path
-
-      // Replace the last simplified path with the original path
-      if (lastOriginalPath) {
-        newPaths.push(lastOriginalPath);
+      const newIsRegularized = [...isRegularized];
+      
+      // Find the last regularized path
+      let lastRegularizedIndex = -1;
+      for (let i = newIsRegularized.length - 1; i >= 0; i--) {
+        if (newIsRegularized[i]) {
+          lastRegularizedIndex = i;
+          break;
+        }
       }
 
-      redrawCanvas(newPaths);
+      if (lastRegularizedIndex === -1) return prevPaths;
 
-      setIsUndoUsed(true); // Mark undo as used
+      // Replace the regularized path with the original
+      const originalPath = originalPaths[lastRegularizedIndex];
+      const shouldClose = distance(originalPath[0], originalPath[originalPath.length - 1]) < closeThreshold;
+      newPaths[lastRegularizedIndex] = shouldClose ? [...originalPath, {isClosed: true}] : originalPath;
+      newIsRegularized[lastRegularizedIndex] = false;
+      
+      setIsRegularized(newIsRegularized);
+      redrawCanvas(newPaths);
       return newPaths;
     });
   };
 
+  // Download as SVG
   const downloadSVG = () => {
     const canvas = canvasRef.current;
     const width = canvas.width;
     const height = canvas.height;
 
-    // Create an SVG string
     let svgContent = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">`;
 
-    paths.forEach(path => {
+    paths.forEach((path) => {
       if (path.isCircle) {
-        // Add circle to SVG
         svgContent += `<circle cx="${path.center.x}" cy="${path.center.y}" r="${path.radius}" stroke="black" fill="none" stroke-width="5" />`;
+      } else if (path.isEllipse) {
+        svgContent += `<ellipse cx="${path.center.x}" cy="${path.center.y}" rx="${path.rx}" ry="${path.ry}" stroke="black" fill="none" stroke-width="5" />`;
+      } else if (path.isClosed && path.length === 5 && path[4].isClosed) {
+        // Rectangle
+        svgContent += `<path d="M ${path[0].x} ${path[0].y} L ${path[1].x} ${path[1].y} L ${path[2].x} ${path[2].y} L ${path[3].x} ${path[3].y} Z" stroke="black" fill="none" stroke-width="5" />`;
+      } else if (path.isClosed) {
+        svgContent += `<path d="M ${path[0].x} ${path[0].y} ${path.slice(1).map(p => `L ${p.x} ${p.y}`).join(' ')} Z" stroke="black" fill="none" stroke-width="5" />`;
       } else {
-        // Add path to SVG
-        svgContent += `<path d="M ${path[0].x} ${path[0].y} ${path
-          .map((point) => `L ${point.x} ${point.y}`)
-          .join(" ")}" stroke="black" fill="none" stroke-width="5" stroke-linecap="round" />`;
+        svgContent += `<path d="M ${path[0].x} ${path[0].y} ${path.slice(1).map(p => `L ${p.x} ${p.y}`).join(' ')}" stroke="black" fill="none" stroke-width="5" />`;
       }
     });
 
     svgContent += `</svg>`;
 
-    // Create a Blob and trigger download
     const blob = new Blob([svgContent], { type: "image/svg+xml" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -375,16 +530,61 @@ const DrawingApp = () => {
         onMouseLeave={stopDrawing}
         className="bg-white"
       />
+      
       <div className="mt-4 flex gap-2">
-        <button onClick={() => setTool("pencil")} className="p-2 bg-blue-500 text-white rounded-lg">✏️ Pencil</button>
-        <button onClick={() => setTool("eraser")} className="p-2 bg-gray-500 text-white rounded-lg">🧽 Eraser</button>
-        <button onClick={undoLastConnection} className="p-2 bg-red-500 text-white rounded-lg">Undo</button>
-        <button onClick={downloadSVG} className="p-2 bg-green-500 text-white rounded-lg">Download SVG</button>
+        <button
+          onClick={() => setTool("pencil")}
+          className={`p-2 rounded-lg ${tool === "pencil" ? "bg-blue-600 text-white" : "bg-gray-200 text-gray-800"}`}
+        >
+          ✏️ Pencil
+        </button>
+        <button
+          onClick={() => setTool("eraser")}
+          className={`p-2 rounded-lg ${tool === "eraser" ? "bg-blue-600 text-white" : "bg-gray-200 text-gray-800"}`}
+        >
+          🧽 Eraser
+        </button>
       </div>
-      <div className="mt-4">
-        <label htmlFor="epsilon-slider" className="block text-sm font-medium text-gray-700">Epsilon Value: {epsilon}</label>
+      
+      <div className="mt-4 flex gap-2">
+        <button
+          onClick={() => setMode("freehand")}
+          className={`p-2 rounded-lg ${mode === "freehand" ? "bg-green-600 text-white" : "bg-gray-200 text-gray-800"}`}
+        >
+          Freehand
+        </button>
+        <button
+          onClick={() => setMode("circle")}
+          className={`p-2 rounded-lg ${mode === "circle" ? "bg-green-600 text-white" : "bg-gray-200 text-gray-800"}`}
+        >
+          Circle/Ellipse
+        </button>
+        <button
+          onClick={() => setMode("rectangle")}
+          className={`p-2 rounded-lg ${mode === "rectangle" ? "bg-green-600 text-white" : "bg-gray-200 text-gray-800"}`}
+        >
+          Rectangle
+        </button>
+      </div>
+      
+      <div className="mt-4 flex gap-2">
+        <button
+          onClick={undoLastRegularization}
+          className="p-2 bg-red-500 text-white rounded-lg"
+        >
+          Undo Regularization
+        </button>
+        <button
+          onClick={downloadSVG}
+          className="p-2 bg-green-500 text-white rounded-lg"
+        >
+          Download SVG
+        </button>
+      </div>
+      
+      <div className="mt-4 flex items-center">
+        <span className="text-2xl mr-2">~</span>
         <input
-          id="epsilon-slider"
           type="range"
           min="1"
           max="50"
@@ -392,6 +592,7 @@ const DrawingApp = () => {
           onChange={(e) => setEpsilon(parseFloat(e.target.value))}
           className="w-64"
         />
+        <span className="text-2xl ml-2">/</span>
       </div>
     </div>
   );

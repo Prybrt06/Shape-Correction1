@@ -161,34 +161,95 @@ const fitCircle = (points) => {
   return null;
 };
 
-// Fit ellipse to points (simplified approach)
+// Improved ellipse fitting using PCA
 const fitEllipse = (points) => {
   if (points.length < 10) return null;
-  
-  // Simple approach: use bounding box
-  const xs = points.map(p => p.x);
-  const ys = points.map(p => p.y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  
-  const center = {
-    x: (minX + maxX) / 2,
-    y: (minY + maxY) / 2
-  };
-  
-  const rx = (maxX - minX) / 2;
-  const ry = (maxY - minY) / 2;
-  
+
+  // Calculate centroid
+  const centroid = points.reduce((acc, p) => {
+    acc.x += p.x;
+    acc.y += p.y;
+    return acc;
+  }, { x: 0, y: 0 });
+  centroid.x /= points.length;
+  centroid.y /= points.length;
+
+  // Center points
+  const centered = points.map(p => ({
+    x: p.x - centroid.x,
+    y: p.y - centroid.y
+  }));
+
+  // Calculate covariance matrix
+  let xx = 0, xy = 0, yy = 0;
+  centered.forEach(p => {
+    xx += p.x * p.x;
+    xy += p.x * p.y;
+    yy += p.y * p.y;
+  });
+  xx /= points.length;
+  xy /= points.length;
+  yy /= points.length;
+
+  // Calculate eigenvalues
+  const trace = xx + yy;
+  const det = xx * yy - xy * xy;
+  const discriminant = Math.sqrt(trace * trace / 4 - det);
+  const lambda1 = trace / 2 + discriminant;
+  const lambda2 = trace / 2 - discriminant;
+
+  // Calculate major and minor axes
+  const major = Math.sqrt(lambda1) * 2;
+  const minor = Math.sqrt(lambda2) * 2;
+
+  // Calculate rotation angle
+  let angle = 0;
+  if (xy !== 0) {
+    angle = Math.atan2(lambda1 - xx, xy) * 180 / Math.PI;
+  }
+
   // Check if it's actually ellipse-like
   const startPoint = points[0];
   const endPoint = points[points.length - 1];
   const startEndDistance = distance(startPoint, endPoint);
-  
+
   if (startEndDistance > 20) return null;
-  
-  return { center, rx, ry };
+
+  return { 
+    center: centroid, 
+    rx: major /1.5, 
+    ry: minor /1.5, 
+    angle 
+  };
+};
+
+// Improved check for combining strokes
+const canFormCircle = (stroke1, stroke2, threshold = 20) => {
+  const start1 = stroke1[0];
+  const end1 = stroke1[stroke1.length - 1];
+  const start2 = stroke2[0];
+  const end2 = stroke2[stroke2.length - 1];
+
+  // Check if endpoints are close in either combination
+  return (
+    (distance(end1, start2) < threshold && distance(start1, end2) < threshold) ||
+    (distance(end2, start1) < threshold && distance(start2, end1) < threshold)
+  );
+};
+
+// Improved stroke combining
+const combineStrokes = (stroke1, stroke2) => {
+  const start1 = stroke1[0];
+  const end1 = stroke1[stroke1.length - 1];
+  const start2 = stroke2[0];
+  const end2 = stroke2[stroke2.length - 1];
+
+  // Determine which combination makes more sense
+  if (distance(end1, start2) < distance(end2, start1)) {
+    return [...stroke1, ...stroke2];
+  } else {
+    return [...stroke2, ...stroke1];
+  }
 };
 
 // Regularize path based on selected mode
@@ -215,12 +276,23 @@ const regularizePath = (points, epsilon, mode, shouldClose = false) => {
       
       const ellipse = fitEllipse(points);
       if (ellipse) {
-        const { center, rx, ry } = ellipse;
+        const { center, rx, ry, angle } = ellipse;
         const angleStep = (2 * Math.PI) / points.length;
-        const regularized = points.map((_, i) => ({
-          x: center.x + rx * Math.cos(i * angleStep),
-          y: center.y + ry * Math.sin(i * angleStep),
-        }));
+        const cosAngle = Math.cos(angle * Math.PI / 180);
+        const sinAngle = Math.sin(angle * Math.PI / 180);
+        
+        const regularized = points.map((_, i) => {
+          const theta = i * angleStep;
+          const x = rx * Math.cos(theta);
+          const y = ry * Math.sin(theta);
+          
+          // Apply rotation
+          return {
+            x: center.x + (x * cosAngle - y * sinAngle),
+            y: center.y + (x * sinAngle + y * cosAngle)
+          };
+        });
+        
         if (shouldClose) regularized.push({...originalStartPoint});
         return regularized;
       }
@@ -299,7 +371,8 @@ const DrawingApp = () => {
         context.ellipse(
           path.center.x, path.center.y,
           path.rx, path.ry,
-          0, 0, 2 * Math.PI
+          path.angle * Math.PI / 180,
+          0, 2 * Math.PI
         );
         context.stroke();
       } else if (path.isClosed && path.length === 5 && path[4].isClosed) {
@@ -353,47 +426,59 @@ const DrawingApp = () => {
     setIsDrawing(false);
     if (currentPath.length < 2) return;
 
-    // Check if stroke should be closed
-    const shouldClose = distance(currentPath[0], currentPath[currentPath.length - 1]) < closeThreshold;
-    
     setPaths((prevPaths) => {
       const newPaths = [...prevPaths];
       const newOriginalPaths = [...originalPaths];
       const newIsRegularized = [...isRegularized];
 
-      // First check if we should connect to previous path
-      if (newPaths.length > 0 && newOriginalPaths.length > 0) {
+      // In circle mode, check if we can combine with previous stroke
+      if (mode === 'circle' && newOriginalPaths.length > 0) {
         const lastOriginal = newOriginalPaths[newOriginalPaths.length - 1];
-        const lastPoint = lastOriginal[lastOriginal.length - 1];
-        const firstPoint = currentPath[0];
-
-        if (distance(lastPoint, firstPoint) < connectionThreshold) {
-          // Connect the paths first
-          const midPoint = {
-            x: (lastPoint.x + firstPoint.x) / 2,
-            y: (lastPoint.y + firstPoint.y) / 2,
-          };
-
-          newOriginalPaths.pop();
-          const mergedPath = [...lastOriginal, midPoint, ...currentPath];
-          newOriginalPaths.push(mergedPath);
-
-          // Then regularize the connected path
-          const newRegularized = regularizePath(mergedPath, epsilon, mode);
-          newPaths.pop();
-          newPaths.push(newRegularized);
-          newIsRegularized.pop();
-          newIsRegularized.push(true);
+        
+        if (canFormCircle(lastOriginal, currentPath)) {
+          // Combine the strokes
+          const combined = combineStrokes(lastOriginal, currentPath);
           
-          setOriginalPaths(newOriginalPaths);
-          setIsRegularized(newIsRegularized);
-          redrawCanvas(newPaths);
-          return newPaths;
+          // Try to fit circle first
+          const circle = fitCircle(combined);
+          if (circle) {
+            newPaths.pop();
+            newOriginalPaths.pop();
+            newIsRegularized.pop();
+            
+            newPaths.push({ isCircle: true, ...circle });
+            newOriginalPaths.push(combined);
+            newIsRegularized.push(true);
+            
+            setOriginalPaths(newOriginalPaths);
+            setIsRegularized(newIsRegularized);
+            redrawCanvas(newPaths);
+            return newPaths;
+          }
+          
+          // Then try ellipse
+          const ellipse = fitEllipse(combined);
+          if (ellipse) {
+            newPaths.pop();
+            newOriginalPaths.pop();
+            newIsRegularized.pop();
+            
+            newPaths.push({ isEllipse: true, ...ellipse });
+            newOriginalPaths.push(combined);
+            newIsRegularized.push(true);
+            
+            setOriginalPaths(newOriginalPaths);
+            setIsRegularized(newIsRegularized);
+            redrawCanvas(newPaths);
+            return newPaths;
+          }
         }
       }
 
-      // If not connecting, process as new stroke
+      // If not combining, process as new stroke
+      const shouldClose = distance(currentPath[0], currentPath[currentPath.length - 1]) < closeThreshold;
       const regularized = regularizePath(currentPath, epsilon, mode, shouldClose);
+      
       newOriginalPaths.push(currentPath);
       
       if (mode === 'circle' && shouldClose) {
@@ -432,8 +517,21 @@ const DrawingApp = () => {
   const eraseStroke = (x, y) => {
     setPaths((prevPaths) => {
       const newPaths = prevPaths.filter((path) => {
-        if (path.isCircle || path.isEllipse) {
-          return distance({ x, y }, path.center) > Math.max(path.radius || 0, path.rx || 0);
+        if (path.isCircle) {
+          return distance({ x, y }, path.center) > path.radius;
+        } else if (path.isEllipse) {
+          // More precise ellipse hit testing
+          const dx = x - path.center.x;
+          const dy = y - path.center.y;
+          const cosAngle = Math.cos(path.angle * Math.PI / 180);
+          const sinAngle = Math.sin(path.angle * Math.PI / 180);
+          
+          // Rotate point into ellipse's coordinate system
+          const xRot = dx * cosAngle + dy * sinAngle;
+          const yRot = -dx * sinAngle + dy * cosAngle;
+          
+          // Check if point is inside ellipse
+          return (xRot * xRot) / (path.rx * path.rx) + (yRot * yRot) / (path.ry * path.ry) > 1;
         } else {
           return !path.some((point, index) => {
             if (index === 0) return false;
@@ -454,31 +552,20 @@ const DrawingApp = () => {
     });
   };
 
-  // Undo last regularization
-  const undoLastRegularization = () => {
+  // Undo last action
+  const undoLastAction = () => {
     setPaths((prevPaths) => {
-      if (prevPaths.length === 0 || originalPaths.length === 0) return prevPaths;
-
+      if (prevPaths.length === 0) return prevPaths;
+      
       const newPaths = [...prevPaths];
+      const newOriginalPaths = [...originalPaths];
       const newIsRegularized = [...isRegularized];
       
-      // Find the last regularized path
-      let lastRegularizedIndex = -1;
-      for (let i = newIsRegularized.length - 1; i >= 0; i--) {
-        if (newIsRegularized[i]) {
-          lastRegularizedIndex = i;
-          break;
-        }
-      }
-
-      if (lastRegularizedIndex === -1) return prevPaths;
-
-      // Replace the regularized path with the original
-      const originalPath = originalPaths[lastRegularizedIndex];
-      const shouldClose = distance(originalPath[0], originalPath[originalPath.length - 1]) < closeThreshold;
-      newPaths[lastRegularizedIndex] = shouldClose ? [...originalPath, {isClosed: true}] : originalPath;
-      newIsRegularized[lastRegularizedIndex] = false;
+      newPaths.pop();
+      newOriginalPaths.pop();
+      newIsRegularized.pop();
       
+      setOriginalPaths(newOriginalPaths);
       setIsRegularized(newIsRegularized);
       redrawCanvas(newPaths);
       return newPaths;
@@ -497,7 +584,7 @@ const DrawingApp = () => {
       if (path.isCircle) {
         svgContent += `<circle cx="${path.center.x}" cy="${path.center.y}" r="${path.radius}" stroke="black" fill="none" stroke-width="5" />`;
       } else if (path.isEllipse) {
-        svgContent += `<ellipse cx="${path.center.x}" cy="${path.center.y}" rx="${path.rx}" ry="${path.ry}" stroke="black" fill="none" stroke-width="5" />`;
+        svgContent += `<ellipse cx="${path.center.x}" cy="${path.center.y}" rx="${path.rx}" ry="${path.ry}" transform="rotate(${path.angle} ${path.center.x} ${path.center.y})" stroke="black" fill="none" stroke-width="5" />`;
       } else if (path.isClosed && path.length === 5 && path[4].isClosed) {
         // Rectangle
         svgContent += `<path d="M ${path[0].x} ${path[0].y} L ${path[1].x} ${path[1].y} L ${path[2].x} ${path[2].y} L ${path[3].x} ${path[3].y} Z" stroke="black" fill="none" stroke-width="5" />`;
@@ -569,10 +656,10 @@ const DrawingApp = () => {
       
       <div className="mt-4 flex gap-2">
         <button
-          onClick={undoLastRegularization}
+          onClick={undoLastAction}
           className="p-2 bg-red-500 text-white rounded-lg"
         >
-          Undo Regularization
+          Undo
         </button>
         <button
           onClick={downloadSVG}
