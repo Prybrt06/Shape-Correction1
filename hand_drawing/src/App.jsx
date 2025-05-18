@@ -359,6 +359,19 @@ const DrawingApp = () => {
     context.lineWidth = 5;
     context.strokeStyle = "black";
     contextRef.current = context;
+
+    // Add keyboard event listener
+    const handleKeyDown = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+        e.preventDefault();
+        undoLastAction();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
   }, []);
 
   // Redraw all paths
