@@ -52,7 +52,7 @@ const simplifyPath = (points, epsilon) => {
   return simplified;
 };
 
-// Detect if points form a rectangle (improved to handle both axis-aligned and rotated cases)
+// Detect if points form a rectangle
 const detectRectangle = (points, angleThreshold = 15) => {
   if (points.length < 4) return null;
 
@@ -61,7 +61,8 @@ const detectRectangle = (points, angleThreshold = 15) => {
   if (simplified.length !== 4 && simplified.length !== 5) return null;
 
   // Check if closed shape
-  const isClosed = distance(simplified[0], simplified[simplified.length - 1]) < 20;
+  const isClosed =
+    distance(simplified[0], simplified[simplified.length - 1]) < 20;
   const corners = isClosed ? simplified.slice(0, 4) : simplified;
   if (corners.length !== 4) return null;
 
@@ -78,126 +79,26 @@ const detectRectangle = (points, angleThreshold = 15) => {
   if (!angles.every((angle) => Math.abs(angle - 90) < angleThreshold))
     return null;
 
-  // Calculate vectors between consecutive points
-  const vectors = [];
-  for (let i = 0; i < 4; i++) {
-    const p1 = corners[i];
-    const p2 = corners[(i + 1) % 4];
-    vectors.push({
-      x: p2.x - p1.x,
-      y: p2.y - p1.y
-    });
-  }
+  // Calculate bounding rectangle
+  const xs = corners.map((p) => p.x);
+  const ys = corners.map((p) => p.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
 
-  // Calculate angles of each side with horizontal axis
-  const sideAngles = vectors.map(v => Math.atan2(v.y, v.x) * (180 / Math.PI));
-
-  // Check if the rectangle is approximately axis-aligned
-  const isAxisAligned = sideAngles.every(angle => 
-    Math.abs(angle % 90) < angleThreshold || 
-    Math.abs(angle % 90 - 90) < angleThreshold
-  );
-
-  if (isAxisAligned) {
-    // Handle axis-aligned case
-    const xs = corners.map(p => p.x);
-    const ys = corners.map(p => p.y);
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const minY = Math.min(...ys);
-    const maxY = Math.max(...ys);
-
-    return {
-      corners: [
-        { x: minX, y: minY },
-        { x: maxX, y: minY },
-        { x: maxX, y: maxY },
-        { x: minX, y: maxY }
-      ],
-      width: maxX - minX,
-      height: maxY - minY,
-      angle: 0
-    };
-  } else {
-    // Handle rotated case
-    // Calculate center of the rectangle
-    const center = {
-      x: corners.reduce((sum, p) => sum + p.x, 0) / 4,
-      y: corners.reduce((sum, p) => sum + p.y, 0) / 4
-    };
-
-    // Find the two principal directions (longest and perpendicular)
-    let maxDist = 0;
-    let principalIndex = 0;
-    for (let i = 0; i < 4; i++) {
-      const dist = distance({x: 0, y: 0}, vectors[i]);
-      if (dist > maxDist) {
-        maxDist = dist;
-        principalIndex = i;
-      }
-    }
-
-    const principal = vectors[principalIndex];
-    const orthogonal = {
-      x: -principal.y,
-      y: principal.x
-    };
-
-    // Normalize the vectors
-    const principalLength = distance({x: 0, y: 0}, principal);
-    const orthogonalLength = distance({x: 0, y: 0}, orthogonal);
-
-    const principalNorm = {
-      x: principal.x / principalLength,
-      y: principal.y / principalLength
-    };
-
-    const orthogonalNorm = {
-      x: orthogonal.x / orthogonalLength,
-      y: orthogonal.y / orthogonalLength
-    };
-
-    // Project all points onto the principal and orthogonal axes
-    const principalProjections = corners.map(p => 
-      (p.x - center.x) * principalNorm.x + (p.y - center.y) * principalNorm.y
-    );
-    const orthogonalProjections = corners.map(p => 
-      (p.x - center.x) * orthogonalNorm.x + (p.y - center.y) * orthogonalNorm.y
-    );
-
-    // Find min and max projections
-    const minPrincipal = Math.min(...principalProjections);
-    const maxPrincipal = Math.max(...principalProjections);
-    const minOrthogonal = Math.min(...orthogonalProjections);
-    const maxOrthogonal = Math.max(...orthogonalProjections);
-
-    // Calculate the four corners of the regularized rectangle
-    const regularizedCorners = [
-      {
-        x: center.x + minPrincipal * principalNorm.x + minOrthogonal * orthogonalNorm.x,
-        y: center.y + minPrincipal * principalNorm.y + minOrthogonal * orthogonalNorm.y
-      },
-      {
-        x: center.x + maxPrincipal * principalNorm.x + minOrthogonal * orthogonalNorm.x,
-        y: center.y + maxPrincipal * principalNorm.y + minOrthogonal * orthogonalNorm.y
-      },
-      {
-        x: center.x + maxPrincipal * principalNorm.x + maxOrthogonal * orthogonalNorm.x,
-        y: center.y + maxPrincipal * principalNorm.y + maxOrthogonal * orthogonalNorm.y
-      },
-      {
-        x: center.x + minPrincipal * principalNorm.x + maxOrthogonal * orthogonalNorm.x,
-        y: center.y + minPrincipal * principalNorm.y + maxOrthogonal * orthogonalNorm.y
-      }
-    ];
-
-    return {
-      corners: regularizedCorners,
-      width: maxPrincipal - minPrincipal,
-      height: maxOrthogonal - minOrthogonal,
-      angle: Math.atan2(principalNorm.y, principalNorm.x) * (180 / Math.PI)
-    };
-  }
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+    corners: [
+      { x: minX, y: minY },
+      { x: maxX, y: minY },
+      { x: maxX, y: maxY },
+      { x: minX, y: maxY },
+    ],
+  };
 };
 
 // Fit circle to points
@@ -335,41 +236,16 @@ const fitEllipse = (points) => {
   };
 };
 
-// Improved check for combining strokes
-const canFormCircle = (stroke1, stroke2, threshold = 20) => {
-  const start1 = stroke1[0];
-  const end1 = stroke1[stroke1.length - 1];
-  const start2 = stroke2[0];
-  const end2 = stroke2[stroke2.length - 1];
-
-  // Check if endpoints are close in either combination
-  return (
-    (distance(end1, start2) < threshold &&
-      distance(start1, end2) < threshold) ||
-    (distance(end2, start1) < threshold && distance(start2, end1) < threshold)
-  );
-};
-
-// Check if strokes should be connected in freehand mode
+// Check if strokes should be connected
 const shouldConnectStrokes = (stroke1, stroke2, threshold = 20) => {
   const end1 = stroke1[stroke1.length - 1];
   const start2 = stroke2[0];
   return distance(end1, start2) < threshold;
 };
 
-// Improved stroke combining
+// Combine strokes
 const combineStrokes = (stroke1, stroke2) => {
-  const start1 = stroke1[0];
-  const end1 = stroke1[stroke1.length - 1];
-  const start2 = stroke2[0];
-  const end2 = stroke2[stroke2.length - 1];
-
-  // Determine which combination makes more sense
-  if (distance(end1, start2) < distance(end2, start1)) {
-    return [...stroke1, ...stroke2];
-  } else {
-    return [...stroke2, ...stroke1];
-  }
+  return [...stroke1, ...stroke2];
 };
 
 // Regularize path based on selected mode
@@ -562,8 +438,8 @@ const DrawingApp = () => {
       const newOriginalPaths = [...originalPaths];
       const newIsRegularized = [...isRegularized];
 
-      // In freehand mode, check if we can connect with previous stroke
-      if (mode === "freehand" && newOriginalPaths.length > 0) {
+      // Check if we can connect with previous stroke in any mode
+      if (newOriginalPaths.length > 0) {
         const lastOriginal = newOriginalPaths[newOriginalPaths.length - 1];
 
         if (shouldConnectStrokes(lastOriginal, currentPath, connectionThreshold)) {
@@ -583,9 +459,39 @@ const DrawingApp = () => {
             shouldClose
           );
 
-          newPaths.push(
-            shouldClose ? [...regularized, { isClosed: true }] : regularized
-          );
+          // Process based on current mode
+          if (mode === "circle" && shouldClose) {
+            const circle = fitCircle(combined);
+            if (circle) {
+              newPaths.push({ isCircle: true, ...circle });
+            } else {
+              const ellipse = fitEllipse(combined);
+              if (ellipse) {
+                newPaths.push({ isEllipse: true, ...ellipse });
+              } else {
+                newPaths.push(
+                  shouldClose ? [...regularized, { isClosed: true }] : regularized
+                );
+              }
+            }
+          } else if (mode === "rectangle" && shouldClose) {
+            const rectangle = detectRectangle(combined);
+            if (rectangle) {
+              newPaths.push([
+                ...rectangle.corners,
+                { ...rectangle.corners[0], isClosed: true },
+              ]);
+            } else {
+              newPaths.push(
+                shouldClose ? [...regularized, { isClosed: true }] : regularized
+              );
+            }
+          } else {
+            newPaths.push(
+              shouldClose ? [...regularized, { isClosed: true }] : regularized
+            );
+          }
+
           newOriginalPaths.push(combined);
           newIsRegularized.push(true);
 
@@ -593,50 +499,6 @@ const DrawingApp = () => {
           setIsRegularized(newIsRegularized);
           redrawCanvas(newPaths);
           return newPaths;
-        }
-      }
-
-      // In circle mode, check if we can combine with previous stroke
-      if (mode === "circle" && newOriginalPaths.length > 0) {
-        const lastOriginal = newOriginalPaths[newOriginalPaths.length - 1];
-
-        if (canFormCircle(lastOriginal, currentPath)) {
-          // Combine the strokes
-          const combined = combineStrokes(lastOriginal, currentPath);
-
-          // Try to fit circle first
-          const circle = fitCircle(combined);
-          if (circle) {
-            newPaths.pop();
-            newOriginalPaths.pop();
-            newIsRegularized.pop();
-
-            newPaths.push({ isCircle: true, ...circle });
-            newOriginalPaths.push(combined);
-            newIsRegularized.push(true);
-
-            setOriginalPaths(newOriginalPaths);
-            setIsRegularized(newIsRegularized);
-            redrawCanvas(newPaths);
-            return newPaths;
-          }
-
-          // Then try ellipse
-          const ellipse = fitEllipse(combined);
-          if (ellipse) {
-            newPaths.pop();
-            newOriginalPaths.pop();
-            newIsRegularized.pop();
-
-            newPaths.push({ isEllipse: true, ...ellipse });
-            newOriginalPaths.push(combined);
-            newIsRegularized.push(true);
-
-            setOriginalPaths(newOriginalPaths);
-            setIsRegularized(newIsRegularized);
-            redrawCanvas(newPaths);
-            return newPaths;
-          }
         }
       }
 
