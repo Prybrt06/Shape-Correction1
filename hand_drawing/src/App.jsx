@@ -52,7 +52,7 @@ const simplifyPath = (points, epsilon) => {
   return simplified;
 };
 
-// Detect if points form a rectangle
+// Detect if points form a rectangle (improved to handle both axis-aligned and rotated cases)
 const detectRectangle = (points, angleThreshold = 15) => {
   if (points.length < 4) return null;
 
@@ -61,8 +61,7 @@ const detectRectangle = (points, angleThreshold = 15) => {
   if (simplified.length !== 4 && simplified.length !== 5) return null;
 
   // Check if closed shape
-  const isClosed =
-    distance(simplified[0], simplified[simplified.length - 1]) < 20;
+  const isClosed = distance(simplified[0], simplified[simplified.length - 1]) < 20;
   const corners = isClosed ? simplified.slice(0, 4) : simplified;
   if (corners.length !== 4) return null;
 
@@ -79,26 +78,126 @@ const detectRectangle = (points, angleThreshold = 15) => {
   if (!angles.every((angle) => Math.abs(angle - 90) < angleThreshold))
     return null;
 
-  // Calculate bounding rectangle
-  const xs = corners.map((p) => p.x);
-  const ys = corners.map((p) => p.y);
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
+  // Calculate vectors between consecutive points
+  const vectors = [];
+  for (let i = 0; i < 4; i++) {
+    const p1 = corners[i];
+    const p2 = corners[(i + 1) % 4];
+    vectors.push({
+      x: p2.x - p1.x,
+      y: p2.y - p1.y
+    });
+  }
 
-  return {
-    x: minX,
-    y: minY,
-    width: maxX - minX,
-    height: maxY - minY,
-    corners: [
-      { x: minX, y: minY },
-      { x: maxX, y: minY },
-      { x: maxX, y: maxY },
-      { x: minX, y: maxY },
-    ],
-  };
+  // Calculate angles of each side with horizontal axis
+  const sideAngles = vectors.map(v => Math.atan2(v.y, v.x) * (180 / Math.PI));
+
+  // Check if the rectangle is approximately axis-aligned
+  const isAxisAligned = sideAngles.every(angle => 
+    Math.abs(angle % 90) < angleThreshold || 
+    Math.abs(angle % 90 - 90) < angleThreshold
+  );
+
+  if (isAxisAligned) {
+    // Handle axis-aligned case
+    const xs = corners.map(p => p.x);
+    const ys = corners.map(p => p.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+
+    return {
+      corners: [
+        { x: minX, y: minY },
+        { x: maxX, y: minY },
+        { x: maxX, y: maxY },
+        { x: minX, y: maxY }
+      ],
+      width: maxX - minX,
+      height: maxY - minY,
+      angle: 0
+    };
+  } else {
+    // Handle rotated case
+    // Calculate center of the rectangle
+    const center = {
+      x: corners.reduce((sum, p) => sum + p.x, 0) / 4,
+      y: corners.reduce((sum, p) => sum + p.y, 0) / 4
+    };
+
+    // Find the two principal directions (longest and perpendicular)
+    let maxDist = 0;
+    let principalIndex = 0;
+    for (let i = 0; i < 4; i++) {
+      const dist = distance({x: 0, y: 0}, vectors[i]);
+      if (dist > maxDist) {
+        maxDist = dist;
+        principalIndex = i;
+      }
+    }
+
+    const principal = vectors[principalIndex];
+    const orthogonal = {
+      x: -principal.y,
+      y: principal.x
+    };
+
+    // Normalize the vectors
+    const principalLength = distance({x: 0, y: 0}, principal);
+    const orthogonalLength = distance({x: 0, y: 0}, orthogonal);
+
+    const principalNorm = {
+      x: principal.x / principalLength,
+      y: principal.y / principalLength
+    };
+
+    const orthogonalNorm = {
+      x: orthogonal.x / orthogonalLength,
+      y: orthogonal.y / orthogonalLength
+    };
+
+    // Project all points onto the principal and orthogonal axes
+    const principalProjections = corners.map(p => 
+      (p.x - center.x) * principalNorm.x + (p.y - center.y) * principalNorm.y
+    );
+    const orthogonalProjections = corners.map(p => 
+      (p.x - center.x) * orthogonalNorm.x + (p.y - center.y) * orthogonalNorm.y
+    );
+
+    // Find min and max projections
+    const minPrincipal = Math.min(...principalProjections);
+    const maxPrincipal = Math.max(...principalProjections);
+    const minOrthogonal = Math.min(...orthogonalProjections);
+    const maxOrthogonal = Math.max(...orthogonalProjections);
+
+    // Calculate the four corners of the regularized rectangle
+    const regularizedCorners = [
+      {
+        x: center.x + minPrincipal * principalNorm.x + minOrthogonal * orthogonalNorm.x,
+        y: center.y + minPrincipal * principalNorm.y + minOrthogonal * orthogonalNorm.y
+      },
+      {
+        x: center.x + maxPrincipal * principalNorm.x + minOrthogonal * orthogonalNorm.x,
+        y: center.y + maxPrincipal * principalNorm.y + minOrthogonal * orthogonalNorm.y
+      },
+      {
+        x: center.x + maxPrincipal * principalNorm.x + maxOrthogonal * orthogonalNorm.x,
+        y: center.y + maxPrincipal * principalNorm.y + maxOrthogonal * orthogonalNorm.y
+      },
+      {
+        x: center.x + minPrincipal * principalNorm.x + maxOrthogonal * orthogonalNorm.x,
+        y: center.y + minPrincipal * principalNorm.y + maxOrthogonal * orthogonalNorm.y
+      }
+    ];
+
+    return {
+      corners: regularizedCorners,
+      width: maxPrincipal - minPrincipal,
+      height: maxOrthogonal - minOrthogonal,
+      angle: Math.atan2(principalNorm.y, principalNorm.x) * (180 / Math.PI)
+    };
+  }
 };
 
 // Fit circle to points
