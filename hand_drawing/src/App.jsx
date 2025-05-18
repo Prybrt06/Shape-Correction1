@@ -251,6 +251,13 @@ const canFormCircle = (stroke1, stroke2, threshold = 20) => {
   );
 };
 
+// Check if strokes should be connected in freehand mode
+const shouldConnectStrokes = (stroke1, stroke2, threshold = 20) => {
+  const end1 = stroke1[stroke1.length - 1];
+  const start2 = stroke2[0];
+  return distance(end1, start2) < threshold;
+};
+
 // Improved stroke combining
 const combineStrokes = (stroke1, stroke2) => {
   const start1 = stroke1[0];
@@ -456,6 +463,40 @@ const DrawingApp = () => {
       const newOriginalPaths = [...originalPaths];
       const newIsRegularized = [...isRegularized];
 
+      // In freehand mode, check if we can connect with previous stroke
+      if (mode === "freehand" && newOriginalPaths.length > 0) {
+        const lastOriginal = newOriginalPaths[newOriginalPaths.length - 1];
+
+        if (shouldConnectStrokes(lastOriginal, currentPath, connectionThreshold)) {
+          // Combine the strokes
+          const combined = combineStrokes(lastOriginal, currentPath);
+
+          newPaths.pop();
+          newOriginalPaths.pop();
+          newIsRegularized.pop();
+
+          const shouldClose =
+            distance(combined[0], combined[combined.length - 1]) < closeThreshold;
+          const regularized = regularizePath(
+            combined,
+            epsilon,
+            mode,
+            shouldClose
+          );
+
+          newPaths.push(
+            shouldClose ? [...regularized, { isClosed: true }] : regularized
+          );
+          newOriginalPaths.push(combined);
+          newIsRegularized.push(true);
+
+          setOriginalPaths(newOriginalPaths);
+          setIsRegularized(newIsRegularized);
+          redrawCanvas(newPaths);
+          return newPaths;
+        }
+      }
+
       // In circle mode, check if we can combine with previous stroke
       if (mode === "circle" && newOriginalPaths.length > 0) {
         const lastOriginal = newOriginalPaths[newOriginalPaths.length - 1];
@@ -657,7 +698,7 @@ const DrawingApp = () => {
     URL.revokeObjectURL(url);
   };
 
-   return (
+  return (
     <div className="app-container">
       <h1>Free Hand Drawing Canvas</h1>
       <canvas
